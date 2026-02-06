@@ -1,0 +1,27 @@
+# hyprstream configuration
+# Place at: ~/.config/hyprstream/config
+
+# Workspace name that is visible to your stream viewers.
+# OBS captures the headless output which mirrors this workspace.
+streaming_workspace = 0
+
+# Resolution for the virtual headless output.
+virtual_resolution = 1920x1080@60
+
+# Physical monitor name (auto-detected if empty).
+# physical_monitor = eDP-1
+
+# Auto-enable streaming mode when the daemon starts.
+auto_enable = false
+
+# Hook: runs when you switch INTO the streaming workspace.
+# on_streaming_enter = notify-send "Stream visible"
+
+# Hook: runs when you switch AWAY from the streaming workspace.
+# on_streaming_leave = notify-send "Stream hidden"
+
+# Hook: runs when streaming mode is enabled.
+# on_enable = notify-send "Streaming enabled"
+
+# Hook: runs when streaming mode is disabled.
+# on_disable = notify-send "Streaming disabled"

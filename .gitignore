@@ -1,0 +1,23 @@
+# Build artifacts
+hyprstream
+*.o
+*.d
+
+# Nix
+result
+result-*
+
+# Dev environment
+.direnv/
+.cache/
+compile_commands.json
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Internal tooling
+.sisyphus/
