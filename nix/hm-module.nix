@@ -28,12 +28,12 @@ in
       default = { };
       example = lib.literalExpression ''
         {
-          streaming_workspace = "0";
-          virtual_resolution = "1920x1080@60";
-          auto_enable = "true";
-          on_streaming_enter = "notify-send 'Stream visible'";
-          on_streaming_leave = "notify-send 'Stream hidden'";
-        }
+           streaming_workspace = "9";
+           virtual_resolution = "1920x1080@60";
+           auto_enable = "true";
+           on_streaming_enter = "notify-send 'Stream visible'";
+           on_streaming_leave = "notify-send 'Stream hidden'";
+         }
       '';
       description = "Configuration for hyprstream written to ~/.config/hyprstream/config";
     };

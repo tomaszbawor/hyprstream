@@ -98,6 +98,9 @@ int   hs_disable_mirror(const char *headless, const char *resolution);
 int   hs_bind_workspace_to_monitor(const char *workspace, const char *monitor);
 int   hs_detect_physical_monitor(char *out, size_t len);
 int   hs_get_active_workspace(char *out, size_t len);
+int   hs_restore_headless_stolen_workspaces(const char *before_workspaces_json,
+                                           const char *headless,
+                                           const char *streaming_workspace);
 
 /* ------------------------------------------------------------------ */
 /*  ipc.c — Hyprland event listener                                    */

@@ -10,6 +10,88 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+struct hs_ws_loc {
+    char name[HS_MAX_NAME];
+    char monitor[HS_MAX_NAME];
+};
+
+static const char *bounded_strstr(const char *hay, const char *needle, const char *end)
+{
+    size_t nlen = strlen(needle);
+    if (nlen == 0)
+        return hay;
+
+    for (const char *p = hay; p && p + nlen <= end; p++) {
+        if (*p == needle[0] && strncmp(p, needle, nlen) == 0)
+            return p;
+    }
+    return NULL;
+}
+
+static int json_read_string_in_object(const char *obj_start,
+                                      const char *obj_end,
+                                      const char *key,
+                                      char *out,
+                                      size_t out_len)
+{
+    const char *p = bounded_strstr(obj_start, key, obj_end);
+    if (!p)
+        return -1;
+
+    p = strchr(p, ':');
+    if (!p || p >= obj_end)
+        return -1;
+    p++;
+
+    while (p < obj_end && (*p == ' ' || *p == '\t' || *p == '"'))
+        p++;
+
+    size_t i = 0;
+    while (p < obj_end && *p && *p != '"' && i + 1 < out_len)
+        out[i++] = *p++;
+    out[i] = '\0';
+
+    return (i > 0) ? 0 : -1;
+}
+
+static int parse_workspaces_json(const char *json, struct hs_ws_loc *out, size_t out_cap)
+{
+    size_t count = 0;
+    const char *p = json;
+
+    while (p && (p = strchr(p, '{')) != NULL) {
+        const char *end = strchr(p, '}');
+        if (!end)
+            break;
+
+        if (count >= out_cap)
+            break;
+
+        struct hs_ws_loc loc;
+        memset(&loc, 0, sizeof(loc));
+
+        if (json_read_string_in_object(p, end, "\"name\"", loc.name, sizeof(loc.name)) == 0 &&
+            json_read_string_in_object(p, end, "\"monitor\"", loc.monitor, sizeof(loc.monitor)) == 0) {
+            out[count++] = loc;
+        }
+
+        p = end + 1;
+    }
+
+    return (int)count;
+}
+
+static const char *find_monitor_for_workspace(const struct hs_ws_loc *locs,
+                                              int n,
+                                              const char *workspace)
+{
+    for (int i = 0; i < n; i++) {
+        if (strcmp(locs[i].name, workspace) == 0)
+            return locs[i].monitor;
+    }
+    return NULL;
+}
+
 static int hyprland_socket_path(char *buf, size_t len)
 {
     const char *sig = getenv("HYPRLAND_INSTANCE_SIGNATURE");
@@ -214,9 +296,15 @@ int hs_move_workspace_to_monitor(const char *workspace, const char *monitor)
     char *resp = hs_hyprctl(cmd);
     if (!resp)
         return -1;
+
+    int ok = (strstr(resp, "ok") || strstr(resp, "Ok")) ? 0 : -1;
+    if (ok < 0)
+        hs_error("failed to move workspace %s -> monitor %s: %s", workspace, monitor, resp);
+    else
+        hs_info("moved workspace %s -> monitor %s", workspace, monitor);
+
     free(resp);
-    hs_info("moved workspace %s -> monitor %s", workspace, monitor);
-    return 0;
+    return ok;
 }
 
 int hs_switch_workspace(const char *workspace)
@@ -268,9 +356,57 @@ int hs_bind_workspace_to_monitor(const char *workspace, const char *monitor)
     char *resp = hs_hyprctl(cmd);
     if (!resp)
         return -1;
+
+    int ok = (strstr(resp, "ok") || strstr(resp, "Ok")) ? 0 : -1;
+    if (ok < 0)
+        hs_error("failed to bind workspace %s -> monitor %s: %s", workspace, monitor, resp);
+    else
+        hs_info("bound workspace %s -> monitor %s", workspace, monitor);
+
     free(resp);
-    hs_info("bound workspace %s -> monitor %s", workspace, monitor);
-    return 0;
+    return ok;
+}
+
+int hs_restore_headless_stolen_workspaces(const char *before_workspaces_json,
+                                          const char *headless,
+                                          const char *streaming_workspace)
+{
+    if (!before_workspaces_json || !headless || !*headless)
+        return 0;
+
+    char *after_json = hs_hyprctl_json("workspaces");
+    if (!after_json)
+        return -1;
+
+    struct hs_ws_loc before[256];
+    struct hs_ws_loc after[256];
+    int n_before = parse_workspaces_json(before_workspaces_json, before, 256);
+    int n_after = parse_workspaces_json(after_json, after, 256);
+
+    int moved = 0;
+    for (int i = 0; i < n_after; i++) {
+        if (strcmp(after[i].monitor, headless) != 0)
+            continue;
+        if (streaming_workspace && streaming_workspace[0] &&
+            strcmp(after[i].name, streaming_workspace) == 0)
+            continue;
+
+        const char *prev = find_monitor_for_workspace(before, n_before, after[i].name);
+        if (!prev || !*prev)
+            continue;
+        if (strcmp(prev, headless) == 0)
+            continue;
+        if (strncmp(prev, "HEADLESS-", 9) == 0)
+            continue;
+
+        hs_warn("workspace %s moved to %s during enable; restoring to %s",
+                after[i].name, headless, prev);
+        if (hs_move_workspace_to_monitor(after[i].name, prev) == 0)
+            moved++;
+    }
+
+    free(after_json);
+    return moved;
 }
 
 int hs_detect_physical_monitor(char *out, size_t len)

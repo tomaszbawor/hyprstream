@@ -30,7 +30,7 @@ const char *hs_config_default_path(void)
 static void set_defaults(struct hs_config *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
-    hs_strlcpy(cfg->streaming_workspace, "0", sizeof(cfg->streaming_workspace));
+    hs_strlcpy(cfg->streaming_workspace, "9", sizeof(cfg->streaming_workspace));
     hs_strlcpy(cfg->virtual_resolution, "1920x1080@60", sizeof(cfg->virtual_resolution));
     cfg->auto_enable = false;
 }

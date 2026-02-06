@@ -6,6 +6,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -35,12 +36,27 @@ static int streaming_enable(struct hs_state *st)
             return -1;
     }
 
-    if (hs_create_headless(st->headless_name, sizeof(st->headless_name)) < 0)
+    char *before_workspaces = hs_hyprctl_json("workspaces");
+
+    if (hs_create_headless(st->headless_name, sizeof(st->headless_name)) < 0) {
+        free(before_workspaces);
         return -1;
+    }
 
     hs_disable_mirror(st->headless_name, st->cfg.virtual_resolution);
-    hs_bind_workspace_to_monitor(st->cfg.streaming_workspace, st->headless_name);
-    hs_move_workspace_to_monitor(st->cfg.streaming_workspace, st->headless_name);
+    if (hs_bind_workspace_to_monitor(st->cfg.streaming_workspace, st->headless_name) < 0)
+        goto fail;
+    if (hs_move_workspace_to_monitor(st->cfg.streaming_workspace, st->headless_name) < 0)
+        goto fail;
+
+    /*
+     * Hyprland may assign an existing workspace to a newly-created monitor.
+     * If that steals a workspace from a physical monitor, restore it back.
+     */
+    hs_restore_headless_stolen_workspaces(before_workspaces,
+                                          st->headless_name,
+                                          st->cfg.streaming_workspace);
+    free(before_workspaces);
 
     st->mode = HS_MODE_ENABLED;
     st->mirroring_active = false;
@@ -54,6 +70,17 @@ static int streaming_enable(struct hs_state *st)
     hs_info("streaming mode enabled (headless=%s, physical=%s)",
             st->headless_name, st->physical_monitor);
     return 0;
+
+fail:
+    hs_restore_headless_stolen_workspaces(before_workspaces,
+                                          st->headless_name,
+                                          st->cfg.streaming_workspace);
+    free(before_workspaces);
+    if (st->headless_name[0] != '\0') {
+        hs_remove_headless(st->headless_name);
+        st->headless_name[0] = '\0';
+    }
+    return -1;
 }
 
 static int streaming_disable(struct hs_state *st)
