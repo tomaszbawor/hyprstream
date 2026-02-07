@@ -3,6 +3,9 @@ hyprstream
 *.o
 *.d
 
+# Rust
+target/
+
 # Nix
 result
 result-*

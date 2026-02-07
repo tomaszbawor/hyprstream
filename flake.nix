@@ -62,22 +62,23 @@
             inputsFrom = [ pkgs.hyprstream ];
 
             packages = with pkgs; [
-              gcc
-              gnumake
+              cargo
+              rustc
+              rustfmt
+              clippy
+              rust-analyzer
               gdb
-              valgrind
-              clang-tools
-              bear
               man-pages
               man-pages-posix
             ];
 
             shellHook = ''
               echo "hyprstream dev shell"
-              echo "  make        - build"
-              echo "  make clean  - clean build artifacts"
-              echo "  bear -- make - generate compile_commands.json"
-              echo "  gdb ./hyprstream - debug"
+              echo "  cargo build        - build"
+              echo "  cargo build --release - release build"
+              echo "  cargo fmt          - format"
+              echo "  cargo clippy       - lint"
+              echo "  gdb target/debug/hyprstream - debug"
             '';
           };
         }

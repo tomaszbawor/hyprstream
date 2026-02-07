@@ -1,17 +1,18 @@
 {
   lib,
+  rustPlatform,
   stdenv,
   version ? "git",
 }:
 
-stdenv.mkDerivation {
+rustPlatform.buildRustPackage {
   pname = "hyprstream";
   inherit version;
   src = ../.;
 
-  makeFlags = [
-    "PREFIX=$(out)"
-  ];
+  cargoLock = {
+    lockFile = ../Cargo.lock;
+  };
 
   meta = {
     homepage = "https://github.com/tomasz/hyprstream";
