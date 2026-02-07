@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::control;
+use crate::control::Command as CtlCommand;
 use crate::hypr;
 use crate::paths;
 use crate::{hs_error, hs_info, hs_warn};
@@ -11,7 +11,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::process::Command;
+use std::process::Command as ProcessCommand;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -40,10 +40,86 @@ fn exec_async(cmd: &str) {
     if cmd.trim().is_empty() {
         return;
     }
-    let _ = Command::new("sh").arg("-c").arg(cmd).spawn();
+    let _ = ProcessCommand::new("sh").arg("-c").arg(cmd).spawn();
 }
 
-fn reconcile(st: &mut State, ipc: &hypr::HyprIpc) -> Result<()> {
+#[cfg(test)]
+mod tests {
+    use super::{reconcile, Mode, State};
+    use crate::config::Config;
+    use crate::hypr::Hypr;
+    use anyhow::{anyhow, Result};
+    use serde::de::DeserializeOwned;
+    use serde_json::json;
+    use std::cell::RefCell;
+
+    struct FakeHypr {
+        active_ws: RefCell<String>,
+        raw_calls: RefCell<Vec<String>>,
+    }
+
+    impl FakeHypr {
+        fn new(active_ws: &str) -> Self {
+            Self {
+                active_ws: RefCell::new(active_ws.to_string()),
+                raw_calls: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn set_active(&self, ws: &str) {
+            *self.active_ws.borrow_mut() = ws.to_string();
+        }
+    }
+
+    impl Hypr for FakeHypr {
+        fn request_raw(&self, args: &str) -> Result<String> {
+            self.raw_calls.borrow_mut().push(args.to_string());
+            Ok("ok".to_string())
+        }
+
+        fn request_json<T: DeserializeOwned>(&self, args: &str) -> Result<T> {
+            if args == "activeworkspace" {
+                let name = self.active_ws.borrow().clone();
+                let v = json!({"name": name});
+                return Ok(serde_json::from_value::<T>(v)?);
+            }
+            Err(anyhow!("unsupported json query in test: {args}"))
+        }
+    }
+
+    #[test]
+    fn reconcile_enables_and_disables_mirror_on_workspace_change() {
+        let cfg = Config::default();
+        let fake = FakeHypr::new(&cfg.streaming_workspace);
+        let mut st = State {
+            mode: Mode::Enabled,
+            headless: Some("HEADLESS-1".to_string()),
+            physical: "eDP-1".to_string(),
+            active_workspace: String::new(),
+            mirroring_active: false,
+            cfg,
+        };
+
+        reconcile(&mut st, &fake).unwrap();
+        assert!(st.mirroring_active);
+        assert!(fake
+            .raw_calls
+            .borrow()
+            .iter()
+            .any(|c| c.contains("mirror,eDP-1")));
+
+        fake.set_active("1");
+        reconcile(&mut st, &fake).unwrap();
+        assert!(!st.mirroring_active);
+        assert!(fake
+            .raw_calls
+            .borrow()
+            .iter()
+            .any(|c| c.contains("-9999x0")));
+    }
+}
+
+fn reconcile(st: &mut State, ipc: &impl hypr::Hypr) -> Result<()> {
     if st.mode != Mode::Enabled {
         return Ok(());
     }
@@ -75,7 +151,7 @@ fn reconcile(st: &mut State, ipc: &hypr::HyprIpc) -> Result<()> {
     Ok(())
 }
 
-fn streaming_enable(st: &mut State, ipc: &hypr::HyprIpc) -> Result<()> {
+fn streaming_enable(st: &mut State, ipc: &impl hypr::Hypr) -> Result<()> {
     if st.mode == Mode::Enabled {
         hs_info!("already enabled");
         return Ok(());
@@ -139,7 +215,7 @@ fn streaming_enable(st: &mut State, ipc: &hypr::HyprIpc) -> Result<()> {
     Ok(())
 }
 
-fn streaming_disable(st: &mut State, ipc: &hypr::HyprIpc) -> Result<()> {
+fn streaming_disable(st: &mut State, ipc: &impl hypr::Hypr) -> Result<()> {
     if st.mode == Mode::Disabled {
         hs_info!("already disabled");
         return Ok(());
@@ -169,7 +245,7 @@ fn streaming_disable(st: &mut State, ipc: &hypr::HyprIpc) -> Result<()> {
 fn handle_ctl_with_running(
     client: UnixStream,
     st: &mut State,
-    ipc: &hypr::HyprIpc,
+    ipc: &impl hypr::Hypr,
     running: &Arc<AtomicBool>,
 ) -> Result<()> {
     // Peek command first so we can flip running for quit.
@@ -179,32 +255,24 @@ fn handle_ctl_with_running(
     if n == 0 {
         return Ok(());
     }
-    let cmd = String::from_utf8_lossy(&buf[..n]).trim().to_string();
-    // Re-run handler with the command buffered (simple: treat quit specially, otherwise proceed).
-    if cmd == control::CTL_QUIT {
-        let _ = client.write_all(b"shutting down");
-        running.store(false, Ordering::Relaxed);
-        return Ok(());
-    }
+    let cmd_raw = String::from_utf8_lossy(&buf[..n]).trim().to_string();
 
-    // For non-quit commands, handle using existing logic by reusing parsed cmd.
-    // (We keep this small and just duplicate the match.)
-    let response = match cmd.as_str() {
-        control::CTL_ENABLE => {
+    let response = match CtlCommand::parse(&cmd_raw) {
+        Ok(CtlCommand::Enable) => {
             if streaming_enable(st, ipc).is_ok() {
                 "enabled".to_string()
             } else {
                 "error: enable failed".to_string()
             }
         }
-        control::CTL_DISABLE => {
+        Ok(CtlCommand::Disable) => {
             if streaming_disable(st, ipc).is_ok() {
                 "disabled".to_string()
             } else {
                 "error: disable failed".to_string()
             }
         }
-        control::CTL_TOGGLE => {
+        Ok(CtlCommand::Toggle) => {
             let rc = if st.mode == Mode::Enabled {
                 streaming_disable(st, ipc)
             } else {
@@ -220,7 +288,7 @@ fn handle_ctl_with_running(
                 "error: toggle failed".to_string()
             }
         }
-        control::CTL_STATUS => format!(
+        Ok(CtlCommand::Status) => format!(
             "mode={} headless={} physical={} workspace={} mirroring={}",
             if st.mode == Mode::Enabled {
                 "enabled"
@@ -236,8 +304,13 @@ fn handle_ctl_with_running(
             st.active_workspace,
             if st.mirroring_active { "on" } else { "off" }
         ),
-        _ => format!("error: unknown command: {cmd}"),
+        Ok(CtlCommand::Quit) => "shutting down".to_string(),
+        Err(_e) => format!("error: unknown command: {cmd_raw}"),
     };
+
+    if cmd_raw.trim() == CtlCommand::Quit.as_str() {
+        running.store(false, Ordering::Relaxed);
+    }
     let _ = client.write_all(response.as_bytes());
     Ok(())
 }
@@ -260,7 +333,7 @@ fn connect_events() -> Result<UnixStream> {
     Ok(s)
 }
 
-fn handle_event_line(st: &mut State, ipc: &hypr::HyprIpc, line: &str) {
+fn handle_event_line(st: &mut State, ipc: &impl hypr::Hypr, line: &str) {
     let Some((event, data)) = line.split_once(">>") else {
         return;
     };

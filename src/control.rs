@@ -1,15 +1,41 @@
 use crate::paths;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
-pub const CTL_ENABLE: &str = "enable";
-pub const CTL_DISABLE: &str = "disable";
-pub const CTL_TOGGLE: &str = "toggle";
-pub const CTL_STATUS: &str = "status";
-pub const CTL_QUIT: &str = "quit";
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Command {
+    Enable,
+    Disable,
+    Toggle,
+    Status,
+    Quit,
+}
 
-pub fn send(cmd: &str) -> Result<()> {
+impl Command {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Command::Enable => "enable",
+            Command::Disable => "disable",
+            Command::Toggle => "toggle",
+            Command::Status => "status",
+            Command::Quit => "quit",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.trim() {
+            "enable" => Ok(Command::Enable),
+            "disable" => Ok(Command::Disable),
+            "toggle" => Ok(Command::Toggle),
+            "status" => Ok(Command::Status),
+            "quit" => Ok(Command::Quit),
+            other => Err(anyhow!("unknown command: {other}")),
+        }
+    }
+}
+
+pub fn send(cmd: Command) -> Result<()> {
     let path = paths::ctl_socket_path();
 
     let mut s = UnixStream::connect(&path).with_context(|| {
@@ -19,8 +45,8 @@ pub fn send(cmd: &str) -> Result<()> {
         )
     })?;
 
-    s.write_all(cmd.as_bytes())
-        .with_context(|| format!("write control command: {cmd}"))?;
+    s.write_all(cmd.as_str().as_bytes())
+        .with_context(|| format!("write control command: {}", cmd.as_str()))?;
 
     let mut buf = Vec::new();
     s.read_to_end(&mut buf).context("read control response")?;
@@ -31,4 +57,21 @@ pub fn send(cmd: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Command;
+
+    #[test]
+    fn parse_command_trims_whitespace() {
+        assert_eq!(Command::parse(" enable ").unwrap(), Command::Enable);
+        assert_eq!(Command::parse("status\n").unwrap(), Command::Status);
+    }
+
+    #[test]
+    fn parse_command_rejects_unknown() {
+        let err = Command::parse("nope").unwrap_err();
+        assert!(err.to_string().contains("unknown command"));
+    }
 }

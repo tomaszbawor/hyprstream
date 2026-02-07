@@ -84,25 +84,25 @@ fn main() -> ExitCode {
             }
         }
     } else if cmd == "enable" {
-        if let Err(e) = control::send(control::CTL_ENABLE) {
+        if let Err(e) = control::send(control::Command::Enable) {
             eprintln!("{e:#}");
             return ExitCode::from(1);
         }
         ExitCode::SUCCESS
     } else if cmd == "disable" {
-        if let Err(e) = control::send(control::CTL_DISABLE) {
+        if let Err(e) = control::send(control::Command::Disable) {
             eprintln!("{e:#}");
             return ExitCode::from(1);
         }
         ExitCode::SUCCESS
     } else if cmd == "toggle" {
-        if let Err(e) = control::send(control::CTL_TOGGLE) {
+        if let Err(e) = control::send(control::Command::Toggle) {
             eprintln!("{e:#}");
             return ExitCode::from(1);
         }
         ExitCode::SUCCESS
     } else if cmd == "status" {
-        if let Err(e) = control::send(control::CTL_STATUS) {
+        if let Err(e) = control::send(control::Command::Status) {
             eprintln!("{e:#}");
             return ExitCode::from(1);
         }

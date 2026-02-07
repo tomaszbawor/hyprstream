@@ -33,7 +33,7 @@ impl Default for Config {
 
 impl Config {
     pub fn load(path: Option<&str>) -> Result<Self> {
-        let mut cfg = Self::default();
+        let cfg = Self::default();
         let path = path
             .map(|p| p.to_string())
             .unwrap_or_else(|| paths::config_default_path().to_string_lossy().to_string());
@@ -49,7 +49,10 @@ impl Config {
         };
 
         hs_info!("loading config: {}", path);
+        Ok(Self::parse_with_defaults(cfg, &content))
+    }
 
+    fn parse_with_defaults(mut cfg: Config, content: &str) -> Config {
         for (idx, raw) in content.lines().enumerate() {
             let lineno = idx + 1;
             let line = raw.trim();
@@ -76,6 +79,37 @@ impl Config {
             }
         }
 
-        Ok(cfg)
+        cfg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn parse_preserves_defaults_when_empty() {
+        let cfg = Config::parse_with_defaults(Config::default(), "\n# comment\n\n");
+        assert_eq!(cfg.streaming_workspace, "9");
+        assert_eq!(cfg.virtual_resolution, "1920x1080@60");
+        assert!(!cfg.auto_enable);
+    }
+
+    #[test]
+    fn parse_trims_and_sets_values() {
+        let cfg = Config::parse_with_defaults(
+            Config::default(),
+            " streaming_workspace =  12\nvirtual_resolution=1280x720@60\nauto_enable = true\n",
+        );
+        assert_eq!(cfg.streaming_workspace, "12");
+        assert_eq!(cfg.virtual_resolution, "1280x720@60");
+        assert!(cfg.auto_enable);
+    }
+
+    #[test]
+    fn parse_ignores_malformed_lines() {
+        let cfg =
+            Config::parse_with_defaults(Config::default(), "noeqhere\nstreaming_workspace=7\n");
+        assert_eq!(cfg.streaming_workspace, "7");
     }
 }
