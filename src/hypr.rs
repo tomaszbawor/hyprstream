@@ -117,18 +117,34 @@ pub fn remove_headless(ipc: &impl Hypr, name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn enable_mirror(ipc: &impl Hypr, headless: &str, physical: &str) -> Result<()> {
-    let cmd = format!("keyword monitor {headless},preferred,auto,1,mirror,{physical}");
-    let _ = ipc.request_raw(&cmd)?;
-    hs_info!("mirroring: {} -> {}", headless, physical);
+pub fn mirror_headless_from(ipc: &impl Hypr, headless: &str, source: &str) -> Result<()> {
+    let cmd = format!("keyword monitor {headless},preferred,auto,1,mirror,{source}");
+    let resp = ipc.request_raw(&cmd)?;
+    if !ok_reply(&resp) {
+        return Err(anyhow!(
+            "failed to mirror {} from {}: {}",
+            headless,
+            source,
+            resp
+        ));
+    }
+    hs_info!("mirroring: {} -> {}", headless, source);
     Ok(())
 }
 
 pub fn disable_mirror(ipc: &impl Hypr, headless: &str, resolution: &str) -> Result<()> {
     let cmd = format!("keyword monitor {headless},{resolution},-9999x0,1");
-    let _ = ipc.request_raw(&cmd)?;
+    let resp = ipc.request_raw(&cmd)?;
+    if !ok_reply(&resp) {
+        return Err(anyhow!("failed to park {} off-screen: {}", headless, resp));
+    }
     hs_info!("mirror disabled on {} (off-screen)", headless);
     Ok(())
+}
+
+pub fn monitor_exists(ipc: &impl Hypr, name: &str) -> Result<bool> {
+    let monitors: Vec<Monitor> = ipc.request_json("monitors all")?;
+    Ok(monitors.into_iter().any(|m| m.name == name))
 }
 
 pub fn bind_workspace_to_monitor(ipc: &impl Hypr, workspace: &str, monitor: &str) -> Result<()> {

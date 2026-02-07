@@ -43,8 +43,24 @@ fn exec_async(cmd: &str) {
     let _ = ProcessCommand::new("sh").arg("-c").arg(cmd).spawn();
 }
 
+fn ensure_headless(st: &mut State, ipc: &impl hypr::Hypr) -> Result<String> {
+    if let Some(h) = st.headless.as_deref() {
+        if hypr::monitor_exists(ipc, h)? {
+            return Ok(h.to_string());
+        }
+        hs_warn!("headless output {} missing; recreating", h);
+        st.headless = None;
+    }
+
+    let headless = hypr::create_headless(ipc)?;
+    hypr::disable_mirror(ipc, &headless, &st.cfg.virtual_resolution)?;
+    st.headless = Some(headless.clone());
+    Ok(headless)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::handle_event_line;
     use super::{reconcile, Mode, State};
     use crate::config::Config;
     use crate::hypr::Hypr;
@@ -56,6 +72,7 @@ mod tests {
     struct FakeHypr {
         active_ws: RefCell<String>,
         raw_calls: RefCell<Vec<String>>,
+        monitors: RefCell<Vec<String>>,
     }
 
     impl FakeHypr {
@@ -63,6 +80,7 @@ mod tests {
             Self {
                 active_ws: RefCell::new(active_ws.to_string()),
                 raw_calls: RefCell::new(Vec::new()),
+                monitors: RefCell::new(vec!["HDMI-A-2".to_string(), "HEADLESS-1".to_string()]),
             }
         }
 
@@ -82,6 +100,15 @@ mod tests {
                 let name = self.active_ws.borrow().clone();
                 let v = json!({"name": name});
                 return Ok(serde_json::from_value::<T>(v)?);
+            }
+            if args == "monitors all" {
+                let list = self
+                    .monitors
+                    .borrow()
+                    .iter()
+                    .map(|n| json!({"name": n}))
+                    .collect::<Vec<_>>();
+                return Ok(serde_json::from_value::<T>(json!(list))?);
             }
             Err(anyhow!("unsupported json query in test: {args}"))
         }
@@ -106,7 +133,7 @@ mod tests {
             .raw_calls
             .borrow()
             .iter()
-            .any(|c| c.contains("mirror,eDP-1")));
+            .any(|c| c.contains("keyword monitor HEADLESS-1") && c.contains("mirror,eDP-1")));
 
         fake.set_active("1");
         reconcile(&mut st, &fake).unwrap();
@@ -115,7 +142,51 @@ mod tests {
             .raw_calls
             .borrow()
             .iter()
-            .any(|c| c.contains("-9999x0")));
+            .any(|c| c.contains("keyword monitor HEADLESS-1") && c.contains("-9999x0")));
+    }
+
+    #[test]
+    fn v2_workspace_events_trigger_reconcile() {
+        let cfg = Config::default();
+        let fake = FakeHypr::new("1");
+        let mut st = State {
+            mode: Mode::Enabled,
+            headless: Some("HEADLESS-1".to_string()),
+            physical: "eDP-1".to_string(),
+            active_workspace: String::new(),
+            mirroring_active: false,
+            cfg,
+        };
+
+        // Switch to streaming workspace and send a v2 event.
+        fake.set_active("9");
+        handle_event_line(&mut st, &fake, "workspacev2>>1,9");
+        assert!(st.mirroring_active);
+    }
+
+    #[test]
+    fn reconcile_recreates_missing_headless_output() {
+        let cfg = Config::default();
+        let fake = FakeHypr::new("9");
+        // Simulate missing headless by removing it from monitor list.
+        *fake.monitors.borrow_mut() = vec!["HDMI-A-2".to_string()];
+
+        let mut st = State {
+            mode: Mode::Enabled,
+            headless: Some("HEADLESS-1".to_string()),
+            physical: "HDMI-A-2".to_string(),
+            active_workspace: String::new(),
+            mirroring_active: false,
+            cfg,
+        };
+
+        // reconcile should attempt to recreate headless via `output create headless`.
+        let _ = reconcile(&mut st, &fake);
+        assert!(fake
+            .raw_calls
+            .borrow()
+            .iter()
+            .any(|c| c == "output create headless"));
     }
 }
 
@@ -123,24 +194,27 @@ fn reconcile(st: &mut State, ipc: &impl hypr::Hypr) -> Result<()> {
     if st.mode != Mode::Enabled {
         return Ok(());
     }
-    let headless = match st.headless.as_deref() {
-        Some(h) => h,
-        None => return Ok(()),
-    };
+    let headless = ensure_headless(st, ipc)?;
 
     let ws = hypr::active_workspace(ipc)?;
     let on_stream = ws == st.cfg.streaming_workspace;
 
     if on_stream && !st.mirroring_active {
         hs_info!("entering streaming workspace -> enable mirror");
-        hypr::enable_mirror(ipc, headless, &st.physical)?;
+        // Put the streaming workspace on the physical monitor for interaction,
+        // and mirror the physical monitor onto the headless output for OBS capture.
+        hypr::bind_workspace_to_monitor(ipc, &st.cfg.streaming_workspace, &st.physical)?;
+        hypr::move_workspace_to_monitor(ipc, &st.cfg.streaming_workspace, &st.physical)?;
+        hypr::mirror_headless_from(ipc, &headless, &st.physical)?;
         st.mirroring_active = true;
         if !st.cfg.on_streaming_enter.is_empty() {
             exec_async(&st.cfg.on_streaming_enter);
         }
     } else if !on_stream && st.mirroring_active {
         hs_info!("leaving streaming workspace -> disable mirror");
-        hypr::disable_mirror(ipc, headless, &st.cfg.virtual_resolution)?;
+        hypr::disable_mirror(ipc, &headless, &st.cfg.virtual_resolution)?;
+        let _ = hypr::bind_workspace_to_monitor(ipc, &st.cfg.streaming_workspace, &headless);
+        let _ = hypr::move_workspace_to_monitor(ipc, &st.cfg.streaming_workspace, &headless);
         st.mirroring_active = false;
         if !st.cfg.on_streaming_leave.is_empty() {
             exec_async(&st.cfg.on_streaming_leave);
@@ -223,7 +297,7 @@ fn streaming_disable(st: &mut State, ipc: &impl hypr::Hypr) -> Result<()> {
 
     if let Some(headless) = st.headless.as_deref() {
         if st.mirroring_active {
-            hypr::disable_mirror(ipc, headless, &st.cfg.virtual_resolution)?;
+            let _ = hypr::disable_mirror(ipc, headless, &st.cfg.virtual_resolution);
             st.mirroring_active = false;
         }
 
@@ -338,25 +412,29 @@ fn handle_event_line(st: &mut State, ipc: &impl hypr::Hypr, line: &str) {
         return;
     };
 
-    match event {
-        "workspace" | "focusedmon" | "activewindow" | "movewindow" => {
-            if let Err(e) = reconcile(st, ipc) {
-                hs_warn!("reconcile failed: {e:#}");
+    // Hyprland has both legacy and v2 event names (e.g. workspace/workspacev2).
+    // We only use the event as a trigger; we re-query actual state via hyprctl.
+    if event.starts_with("workspace")
+        || event.starts_with("focusedmon")
+        || event.starts_with("activewindow")
+        || event.starts_with("movewindow")
+    {
+        if let Err(e) = reconcile(st, ipc) {
+            hs_warn!("reconcile failed: {e:#}");
+        }
+        return;
+    }
+
+    if event.starts_with("monitorremoved") && st.mode == Mode::Enabled {
+        if let Some(headless) = st.headless.as_deref() {
+            // v2 variants may prefix data with an id, so accept substring match.
+            if data == headless || data.contains(headless) {
+                hs_warn!("headless output was removed externally");
+                st.mode = Mode::Disabled;
+                st.headless = None;
+                st.mirroring_active = false;
             }
         }
-        "monitorremoved" => {
-            if st.mode == Mode::Enabled {
-                if let Some(headless) = st.headless.as_deref() {
-                    if data == headless {
-                        hs_warn!("headless output was removed externally");
-                        st.mode = Mode::Disabled;
-                        st.headless = None;
-                        st.mirroring_active = false;
-                    }
-                }
-            }
-        }
-        _ => {}
     }
 }
 
