@@ -246,7 +246,7 @@ fn handle_ctl_with_running(
     client: UnixStream,
     st: &mut State,
     ipc: &impl hypr::Hypr,
-    running: &Arc<AtomicBool>,
+    shutdown: &Arc<AtomicBool>,
 ) -> Result<()> {
     // Peek command first so we can flip running for quit.
     let mut buf = [0u8; 256];
@@ -309,7 +309,7 @@ fn handle_ctl_with_running(
     };
 
     if cmd_raw.trim() == CtlCommand::Quit.as_str() {
-        running.store(false, Ordering::Relaxed);
+        shutdown.store(true, Ordering::Relaxed);
     }
     let _ = client.write_all(response.as_bytes());
     Ok(())
@@ -363,10 +363,12 @@ fn handle_event_line(st: &mut State, ipc: &impl hypr::Hypr, line: &str) {
 pub fn run(cfg: Config) -> Result<()> {
     let ipc = hypr::HyprIpc::new()?;
 
-    let running = Arc::new(AtomicBool::new(true));
+    // signal_hook::flag::register sets the flag to true when the signal fires.
+    // Model this as a shutdown request.
+    let shutdown = Arc::new(AtomicBool::new(false));
     // Best-effort signal handling; if it fails we still run.
-    let _ = signal_hook::flag::register(libc::SIGINT, Arc::clone(&running));
-    let _ = signal_hook::flag::register(libc::SIGTERM, Arc::clone(&running));
+    let _ = signal_hook::flag::register(libc::SIGINT, Arc::clone(&shutdown));
+    let _ = signal_hook::flag::register(libc::SIGTERM, Arc::clone(&shutdown));
 
     let ctl = create_ctl_listener()?;
     ctl.set_nonblocking(true)?;
@@ -389,7 +391,7 @@ pub fn run(cfg: Config) -> Result<()> {
     let mut reconnect_attempts = 0usize;
     let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
 
-    while running.load(Ordering::Relaxed) {
+    while !shutdown.load(Ordering::Relaxed) {
         let mut events = match connect_events() {
             Ok(s) => s,
             Err(e) => {
@@ -425,7 +427,7 @@ pub fn run(cfg: Config) -> Result<()> {
         ];
 
         'inner: loop {
-            if !running.load(Ordering::Relaxed) {
+            if shutdown.load(Ordering::Relaxed) {
                 break 'inner;
             }
             let rc = unsafe { poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 1000) };
@@ -472,7 +474,8 @@ pub fn run(cfg: Config) -> Result<()> {
                 loop {
                     match ctl.accept() {
                         Ok((client, _addr)) => {
-                            if let Err(e) = handle_ctl_with_running(client, &mut st, &ipc, &running)
+                            if let Err(e) =
+                                handle_ctl_with_running(client, &mut st, &ipc, &shutdown)
                             {
                                 hs_warn!("control handler failed: {e:#}");
                             }
